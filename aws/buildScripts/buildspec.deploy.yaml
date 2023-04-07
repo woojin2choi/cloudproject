@@ -1,0 +1,89 @@
+version: 0.2
+env:
+  git-credential-helper: yes
+  parameter-store:
+    ASSUME_ROLE: /eks/role/arn
+    IMAGE_TAG: /book/sample/main/tag
+    PUB_SUB_A: /base/pub/subnet/a
+    PUB_SUB_C: /base/pub/subnet/c
+  variables:
+    CLUSTER_NAME: eks-demo
+
+phases:
+  install:
+    commands:
+      - echo "Install kubectl ..."
+      - curl -LO "https://dl.k8s.io/release/v1.23.16/bin/linux/amd64/kubectl"
+      - install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+      - curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+      - chmod 700 get_helm.sh
+      - ./get_helm.sh
+  pre_build:
+    commands:
+      - |
+        echo "## Check aws cli and kubectl ##"
+        aws --version
+        kubectl version --client
+        helm version
+
+      - export MY_ECR="${AWS_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}"
+      - echo ${IMAGE_TAG}
+      - echo ${MY_ECR}
+      - |
+        export ASSUME_SESSION_NAME="codebuild-$(date +%s)"
+
+        echo "ASSUME_ROLE_ARN=${ASSUME_ROLE}"
+        aws sts assume-role --role-arn ${ASSUME_ROLE} --role-session-name ${ASSUME_SESSION_NAME} --output json > config.json
+        
+  build:
+    commands:
+      - |
+        echo "Set up eks config ..."
+        export AWS_ACCESS_KEY_ID_OLD=${AWS_ACCESS_KEY_ID}
+        export AWS_SECRET_ACCESS_KEY_OLD=${AWS_SECRET_ACCESS_KEY}
+        export AWS_SESSION_TOKEN_OLD=${AWS_SESSION_TOKEN}
+
+        export AWS_ACCESS_KEY_ID=$(cat config.json | jq ".Credentials.AccessKeyId" | tr -d '"')
+        export AWS_SECRET_ACCESS_KEY=$(cat config.json | jq ".Credentials.SecretAccessKey" | tr -d '"')
+        export AWS_SESSION_TOKEN=$(cat config.json | jq ".Credentials.SessionToken" | tr -d '"')
+        
+        aws eks --region ap-northeast-2 update-kubeconfig --name $CLUSTER_NAME
+
+      - |
+        echo "### Deploy k8s manifest file"
+        kubectl config current-context
+        kubectl get pod -A  
+        
+        cd k8s-manifests
+        cat deployment-template.yaml | envsubst > deployment.yaml
+        cat ingress-template.yaml | envsubst > ingress.yaml
+        
+        cat deployment.yaml
+        cat ingress.yaml
+        
+        kubectl apply -f deployment.yaml
+        kubectl rollout status deployment deployment-demo -n demo
+
+        kubectl apply -f svc.yaml
+        kubectl apply -f ingress.yaml
+      
+      # - cd ${CODEBUILD_SRC_DIR}
+
+      # - |
+      #   echo "### Deploy helm chart"
+        
+      #   cd helm
+      #   cat ./values-template.yaml | envsubst > ./demo/values.yaml
+
+      #   cat ./demo/values.yaml
+      #   helm upgrade --install -n test demo ./demo -f ./demo/values.yaml
+      #   kubectl rollout status deployment deployment-demo -n test
+
+  post_build:
+    commands:
+      - |
+        cd ${CODEBUILD_SRC_DIR}
+        echo "Deploy image tag : ${IMAGE_TAG}" > deploy_output.txt
+artifacts:
+  files:
+    - deploy_output.txt
